@@ -12,20 +12,12 @@ set -euo pipefail
 #   amd                - AMD Zen 3/4/5 (Hawk Point / Phoenix / Ryzen) + Radeon
 #   intel-pre-meteor   - Intel 14th Gen and older (Alder Lake, Raptor Lake, i915)
 #   intel-meteor       - Intel Meteor Lake / Arrow Lake (Core Ultra, Xe, HFI)
-#
-# Examples:
-#   ./build-rt-kernel.sh                              -> 7.2.4-rt-generic
-#   ./build-rt-kernel.sh 7.2.4 amd                    -> 7.2.4-rt-amd
-#   ./build-rt-kernel.sh 7.2.4 intel-meteor           -> 7.2.4-rt-intel-meteor
-#   ./build-rt-kernel.sh 7.2.4 amd studio             -> 7.2.4-rt-amd-studio
 # ==============================================================================
 
 KERNEL_VER="${1:-${KERNEL_VER:-7.2.4}}"
 PLATFORM="${2:-${PLATFORM:-generic}}"
 CUSTOM_TAG="${3:-}"
 
-# Dynamically construct the release string so it shows up in GRUB:
-# e.g., -rt-amd, -rt-intel-meteor, -rt-generic (or -rt-amd-studio if custom tag given)
 if [ -n "${CUSTOM_TAG}" ]; then
     LOCAL_VER="-rt-${PLATFORM}-${CUSTOM_TAG}"
 else
@@ -36,9 +28,9 @@ SRC_DIR="${HOME}/src/kernel"
 ORIGIN_DIR="${PWD}"
 
 echo "================================================================="
-echo " Target Version : ${KERNEL_VER}"
-echo " Release String : ${LOCAL_VER}"
-echo " Boot Menu Label: Ubuntu, with Linux ${KERNEL_VER}${LOCAL_VER}"
+echo " Target Version  : ${KERNEL_VER}"
+echo " Release String  : ${LOCAL_VER}"
+echo " Boot Menu Label : Ubuntu, with Linux ${KERNEL_VER}${LOCAL_VER}"
 echo " Hardware Profile: [${PLATFORM}]"
 echo "================================================================="
 
@@ -206,6 +198,9 @@ grep -E "CONFIG_PREEMPT_RT=|CONFIG_HZ=|CONFIG_RCU_BOOST=" .config
 echo "=== 7. Compiling Debian Packages ==="
 make -j"$(nproc)" bindeb-pkg LOCALVERSION="${LOCAL_VER}" 2>&1 | tee build.log
 
+# Read the generated kernel release before removing build files
+RELEASE_NAME=$(cat include/config/kernel.release 2>/dev/null || echo "${KERNEL_VER}${LOCAL_VER}")
+
 echo "=== 8. Installing Kernel Packages & Updating GRUB ==="
 PKG_PATTERN="${SRC_DIR}/linux-image-*${LOCAL_VER}*.deb"
 HDR_PATTERN="${SRC_DIR}/linux-headers-*${LOCAL_VER}*.deb"
@@ -219,11 +214,17 @@ echo "Installing: $(basename "${LATEST_HDR}")"
 sudo dpkg -i "${LATEST_PKG}" "${LATEST_HDR}"
 sudo update-grub
 
-RELEASE_NAME=$(cat include/config/kernel.release 2>/dev/null || echo "${KERNEL_VER}${LOCAL_VER}")
+echo "=== 9. Cleaning Up Build Artifacts ==="
+cd "${SRC_DIR}"
+if [ -d "linux-${KERNEL_VER}" ]; then
+    echo "Removing source tree 'linux-${KERNEL_VER}' to reclaim disk space..."
+    rm -rf "linux-${KERNEL_VER}"
+fi
 
 echo ""
 echo "================================================================="
-echo " Build Complete!"
-echo " Boot Entry Name: Ubuntu, with Linux ${RELEASE_NAME}"
+echo " Build Complete & Workspace Cleaned!"
+echo " Installed Kernel: ${RELEASE_NAME}"
+echo " Boot Entry Name : Ubuntu, with Linux ${RELEASE_NAME}"
 echo " Reboot your system to load the new kernel."
 echo "================================================================="

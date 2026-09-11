@@ -19,6 +19,7 @@ Automated Bash script to compile and package an optimized, low-latency PREEMPT_R
 - Dynamic GRUB Labels: Automatically reflects your chosen platform profile directly in the GRUB boot menu (e.g., "Ubuntu, with Linux 7.2.4-rt-amd").
 - Fast Build Times: Strips debugging symbols and tracing bloat (DEBUG_INFO, BTF, LOCKDEP, PROVE_LOCKING) to accelerate compilation and eliminate RT lock verification overhead.
 - Native Debian Packaging: Builds native linux-image and linux-headers .deb packages and updates the GRUB bootloader automatically.
+- Cleans build artifacts after successful build to reclaim disk space.
 
 ---
 
