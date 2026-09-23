@@ -8,13 +8,13 @@ set -euo pipefail
 #   ./build-rt-kernel.sh [KERNEL_VERSION] [PLATFORM] [CUSTOM_TAG]
 #
 # Platforms:
-#   generic            - (Default) Pure RT audio stack, inherits hardware drivers
-#   amd                - AMD Zen 3/4/5 (Hawk Point / Phoenix / Ryzen) + Radeon
-#   intel-pre-meteor   - Intel 14th Gen and older (Alder Lake, Raptor Lake, i915)
-#   intel-meteor       - Intel Meteor Lake / Arrow Lake (Core Ultra, Xe, HFI)
+#   generic           - (Default) Pure RT audio stack, inherits hardware drivers
+#   amd               - AMD Zen 3/4/5 (Hawk Point / Phoenix / Ryzen) + Radeon
+#   intel-pre-meteor  - Intel 14th Gen and older (Alder Lake, Raptor Lake, i915)
+#   intel-meteor      - Intel Meteor Lake / Arrow Lake (Core Ultra, Xe, HFI)
 # ==============================================================================
 
-KERNEL_VER="${1:-${KERNEL_VER:-7.2.4}}"
+KERNEL_VER="${1:-${KERNEL_VER:-7.2.7}}"
 PLATFORM="${2:-${PLATFORM:-generic}}"
 CUSTOM_TAG="${3:-}"
 
@@ -111,6 +111,7 @@ echo "=== 4. Applying Universal Real-Time Tuning ==="
 scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
 scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
 
+# PREEMPT_RT deterministic scheduling
 scripts/config --enable CONFIG_EXPERT
 scripts/config --disable CONFIG_PREEMPT_NONE
 scripts/config --disable CONFIG_PREEMPT_VOLUNTARY
@@ -118,6 +119,7 @@ scripts/config --disable CONFIG_PREEMPT
 scripts/config --disable CONFIG_PREEMPT_DYNAMIC
 scripts/config --enable CONFIG_PREEMPT_RT
 
+# High-resolution 1000Hz timer tick
 scripts/config --disable CONFIG_HZ_250
 scripts/config --disable CONFIG_HZ_300
 scripts/config --enable CONFIG_HZ_1000
@@ -125,6 +127,7 @@ scripts/config --set-val CONFIG_HZ 1000
 scripts/config --enable CONFIG_HIGH_RES_TIMERS
 scripts/config --enable CONFIG_NO_HZ_IDLE
 
+# Disable heavy debug overhead and locking trackers
 scripts/config --disable CONFIG_DEBUG_INFO
 scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
@@ -136,10 +139,12 @@ scripts/config --disable CONFIG_DEBUG_SPINLOCK
 scripts/config --disable CONFIG_DEBUG_MUTEXES
 scripts/config --disable CONFIG_DEBUG_ATOMIC_SLEEP
 
+# Real-time RCU boost
 scripts/config --enable CONFIG_RCU_BOOST
 scripts/config --set-val CONFIG_RCU_BOOST_DELAY 500
 scripts/config --enable CONFIG_RCU_LAZY
 
+# Memory allocation & latency stability
 scripts/config --disable CONFIG_TRANSPARENT_HUGEPAGE_ALWAYS
 scripts/config --enable CONFIG_TRANSPARENT_HUGEPAGE_MADVISE
 scripts/config --enable CONFIG_X86_SPLIT_LOCK_DETECT
@@ -149,23 +154,43 @@ scripts/config --enable CONFIG_HARDLOCKUP_DETECTOR
 scripts/config --set-val CONFIG_BOOTPARAM_HARDLOCKUP_PANIC 0
 scripts/config --set-val CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC 0
 
+# Support compressed firmware loading (.zst)
+scripts/config --enable CONFIG_FW_LOADER_COMPRESS_ZSTD
+
 echo "=== 5. Applying Platform-Specific Profile: [${PLATFORM}] ==="
 case "${PLATFORM}" in
     generic)
         echo "Generic profile: pure RT audio tuning applied. Keeping inherited vendor drivers."
         ;;
     amd)
-        echo "AMD profile: enforcing Zen CPPC (amd_pstate), Radeon (amdgpu), and KVM-AMD..."
+        echo "AMD profile: enforcing Zen CPPC (amd_pstate), Radeon (amdgpu as module), and KVM-AMD..."
+        # AMD P-State (Zen 2+)
         scripts/config --enable CONFIG_X86_AMD_PSTATE
-        scripts/config --enable CONFIG_DRM_AMDGPU
-        scripts/config --enable CONFIG_KVM_AMD
+        scripts/config --enable CONFIG_X86_AMD_PSTATE_DEFAULT_MODE_ACTIVE
+
+        # AMDGPU Graphics Stack (Must be =m to trigger initramfs firmware extraction)
+        scripts/config --module CONFIG_DRM_AMDGPU
+        scripts/config --enable CONFIG_DRM_AMD_DC
+        scripts/config --enable CONFIG_DRM_AMD_DC_FP
+        scripts/config --module CONFIG_DRM_AMD_ACP
+
+        # KVM Virtualization
+        scripts/config --module CONFIG_KVM_AMD
+
+        # Strip lingering Intel hardware/power drivers
+        scripts/config --disable CONFIG_DRM_I915
+        scripts/config --disable CONFIG_DRM_XE
+        scripts/config --disable CONFIG_INTEL_HFI_THERMAL
+        scripts/config --disable CONFIG_X86_INTEL_PSTATE
+        scripts/config --disable CONFIG_INTEL_IDLE
         ;;
     intel-pre-meteor)
         echo "Intel legacy profile: enforcing intel_pstate, i915 DRM, and KVM-Intel..."
         scripts/config --enable CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE
         scripts/config --enable CONFIG_X86_INTEL_PSTATE
-        scripts/config --enable CONFIG_DRM_I915
-        scripts/config --enable CONFIG_KVM_INTEL
+        scripts/config --module CONFIG_DRM_I915
+        scripts/config --module CONFIG_KVM_INTEL
+        scripts/config --disable CONFIG_DRM_AMDGPU
         ;;
     intel-meteor)
         echo "Intel Meteor Lake profile: enforcing Xe DRM, HFI Thread Director, and PCIe Performance..."
@@ -175,13 +200,14 @@ case "${PLATFORM}" in
         scripts/config --enable CONFIG_INTEL_TURBO_MAX_3
         scripts/config --enable CONFIG_INTEL_IDLE
         scripts/config --enable CONFIG_CPU_IDLE_GOV_MENU
-        scripts/config --enable CONFIG_DRM_XE
-        scripts/config --enable CONFIG_DRM_I915
-        scripts/config --enable CONFIG_KVM_INTEL
+        scripts/config --module CONFIG_DRM_XE
+        scripts/config --module CONFIG_DRM_I915
+        scripts/config --module CONFIG_KVM_INTEL
         scripts/config --disable CONFIG_PCIEASPM_DEFAULT
         scripts/config --disable CONFIG_PCIEASPM_POWERSAVE
         scripts/config --disable CONFIG_PCIEASPM_POWER_SUPERSAVE
         scripts/config --enable CONFIG_PCIEASPM_PERFORMANCE
+        scripts/config --disable CONFIG_DRM_AMDGPU
         ;;
     *)
         echo "Error: Unknown platform '${PLATFORM}'!"
@@ -193,7 +219,7 @@ esac
 make olddefconfig
 
 echo "=== 6. Configuration Verification ==="
-grep -E "CONFIG_PREEMPT_RT=|CONFIG_HZ=|CONFIG_RCU_BOOST=" .config
+grep -E "CONFIG_PREEMPT_RT=|CONFIG_HZ=|CONFIG_RCU_BOOST=|CONFIG_DRM_AMDGPU=|CONFIG_FW_LOADER_COMPRESS_ZSTD=" .config
 
 echo "=== 7. Compiling Debian Packages ==="
 make -j"$(nproc)" bindeb-pkg LOCALVERSION="${LOCAL_VER}" 2>&1 | tee build.log
