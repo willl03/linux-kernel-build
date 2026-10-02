@@ -12,14 +12,15 @@ Automated Bash script to compile and package an optimized, low-latency PREEMPT_R
 - Memory & Jitter Defense: Configures Transparent Hugepages to madvise (CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y) and enables split-lock detection mitigations (CONFIG_X86_SPLIT_LOCK_DETECT=y) to eliminate latency stalls during audio callbacks.
 - RT Watchdog Protection: Enables lockup detectors while disarming hard/soft lockup kernel panics (CONFIG_BOOTPARAM_HARDLOCKUP_PANIC=0, CONFIG_BOOTPARAM_SOFTLOCKUP_PANIC=0) to prevent false-positive kernel crashes under sustained DSP load.
 - Hardware Architecture Profiles:
-  - generic (Default): Platform-neutral real-time audio profile; inherits vendor drivers without hardware-specific overrides.
-  - amd: Enforces AMD CPPC autonomous frequency scaling (CONFIG_X86_AMD_PSTATE=y), Radeon DRM graphics (CONFIG_DRM_AMDGPU=y), and AMD KVM virtualization (CONFIG_KVM_AMD=y).
-  - intel-pre-meteor: Enforces Intel P-State scaling (CONFIG_X86_INTEL_PSTATE=y), performance governor defaults, legacy Intel graphics (CONFIG_DRM_I915=y), and Intel KVM virtualization (CONFIG_KVM_INTEL=y).
-  - intel-meteor: Enforces Intel Meteor Lake / Arrow Lake Core Ultra features including Intel Thread Director / Hardware Feedback Interface (CONFIG_INTEL_HFI_THERMAL=y, CONFIG_INTEL_TURBO_MAX_3=y), idle drivers (CONFIG_INTEL_IDLE=y), both xe and i915 DRM subsystems (CONFIG_DRM_XE=y, CONFIG_DRM_I915=y), and locks PCIe ASPM to performance (CONFIG_PCIEASPM_PERFORMANCE=y).
-- Dynamic GRUB Labels: Automatically reflects your chosen platform profile directly in the GRUB boot menu (e.g., "Ubuntu, with Linux 7.2.4-rt-amd").
+   - `generic` (Default): Platform-neutral real-time audio profile; inherits vendor drivers without hardware-specific overrides.
+   - `amd`: Enforces AMD CPPC autonomous frequency scaling (`CONFIG_X86_AMD_PSTATE=y`), Radeon DRM graphics (`CONFIG_DRM_AMDGPU=m`), and AMD KVM virtualization (`CONFIG_KVM_AMD=m`).
+   - `intel-pre-meteor`: Enforces Intel P-State scaling (`CONFIG_X86_INTEL_PSTATE=y`), performance governor defaults, legacy Intel graphics (`CONFIG_DRM_I915=m`), and Intel KVM virtualization (`CONFIG_KVM_INTEL=m`).
+   - `intel-meteor`: Enforces Intel Meteor Lake / Arrow Lake Core Ultra features including Intel Thread Director / Hardware Feedback Interface (`CONFIG_INTEL_HFI_THERMAL=y`, `CONFIG_INTEL_TURBO_MAX_3=y`), idle drivers (`CONFIG_INTEL_IDLE=y`), both `xe` and `i915` DRM subsystems (`CONFIG_DRM_XE=m`, `CONFIG_DRM_I915=m`), and locks PCIe ASPM to performance (`CONFIG_PCIEASPM_PERFORMANCE=y`).
 - Fast Build Times: Strips debugging symbols and tracing bloat (DEBUG_INFO, BTF, LOCKDEP, PROVE_LOCKING) to accelerate compilation and eliminate RT lock verification overhead.
 - Native Debian Packaging: Builds native linux-image and linux-headers .deb packages and updates the GRUB bootloader automatically.
 - Cleans build artifacts after successful build to reclaim disk space.
+- Prompts for administrator credentials once at startup and maintains an automated background keep-alive loop, eliminating mid-build or end-of-build password prompt timeouts.
+- Retains the extracted kernel tree in `~/src/kernel` by default for out-of-tree module builds and DKMS support; supports the `--cleanup` flag to reclaim disk space after packaging.
 
 ---
 
@@ -35,16 +36,16 @@ Automated Bash script to compile and package an optimized, low-latency PREEMPT_R
 
 ### Syntax
 
-./build-rt-kernel.sh [KERNEL_VERSION] [PLATFORM] [CUSTOM_TAG]
+./build-rt-kernel.sh [KERNEL_VERSION] [PLATFORM] [CUSTOM_TAG] [--cleanup]
 
 ### Available Profiles:
 
 | Profile | Target Architecture | Key Drivers Configured |
 | :--- | :--- | :--- |
-| generic (Default) | Any x86_64 system | Universal PREEMPT_RT audio tuning; inherits host drivers |
-| amd | AMD Zen 3/4/5 (Hawk Point, Phoenix, Ryzen) | amd_pstate, amdgpu, kvm_amd |
-| intel-pre-meteor | Intel 12th–14th Gen & older (Alder/Raptor Lake) | intel_pstate, i915, kvm_intel, performance gov |
-| intel-meteor | Intel Core Ultra (Meteor Lake, Arrow Lake) | intel_pstate, xe, i915, Intel HFI, PCIe ASPM perf |
+| `generic` (Default) | Any x86_64 system | Universal PREEMPT_RT audio tuning; inherits host drivers |
+| `amd` | AMD Zen 3/4/5 (Hawk Point, Phoenix, Ryzen) | `amd_pstate`, `amdgpu`, `kvm_amd` |
+| `intel-pre-meteor` | Intel 12th–14th Gen & older (Alder/Raptor Lake) | `intel_pstate`, `i915`, `kvm_intel`, performance governor |
+| `intel-meteor` | Intel Core Ultra (Meteor Lake, Arrow Lake) | `intel_pstate`, `xe`, `i915`, Intel HFI, PCIe ASPM performance |
 
 ---
 
@@ -52,28 +53,33 @@ Automated Bash script to compile and package an optimized, low-latency PREEMPT_R
 
 1. Default Build (Generic Platform):
    Builds version 7.2.4 with the generic platform profile:
-   ./build-rt-kernel.sh
+   `./build-rt-kernel.sh`
    -> GRUB Label: "Ubuntu, with Linux 7.2.4-rt-generic"
 
 2. AMD Zen / Ryzen / Hawk Point / Radeon 780M:
    Builds version 7.2.4 optimized for AMD Zen architecture:
-   ./build-rt-kernel.sh 7.2.4 amd
+   `./build-rt-kernel.sh 7.2.4 amd`
    -> GRUB Label: "Ubuntu, with Linux 7.2.4-rt-amd"
 
 3. Intel Meteor Lake / Core Ultra:
    Builds version 7.2.2 with Intel Xe, HFI, and PCIe anti-freeze hardening:
-   ./build-rt-kernel.sh 7.2.2 intel-meteor
+   `./build-rt-kernel.sh 7.2.2 intel-meteor`
    -> GRUB Label: "Ubuntu, with Linux 7.2.2-rt-intel-meteor"
 
 4. Intel 12th/13th/14th Gen (Pre-Meteor Lake):
    Builds version 7.2.4 for Alder Lake / Raptor Lake with i915 graphics:
-   ./build-rt-kernel.sh 7.2.4 intel-pre-meteor
+   `./build-rt-kernel.sh 7.2.4 intel-pre-meteor`
    -> GRUB Label: "Ubuntu, with Linux 7.2.4-rt-intel-pre-meteor"
 
 5. Custom Build with Identifier Tag:
    Appends a custom suffix to the kernel release string:
-   ./build-rt-kernel.sh 7.2.4 amd studio
+   `./build-rt-kernel.sh 7.2.4 amd studio`
    -> GRUB Label: "Ubuntu, with Linux 7.2.4-rt-amd-studio"
+
+6. Build and Automatically Clean Up Source Tree:
+   Purges the extracted source directory after packaging to free disk space:
+   `./build-rt-kernel.sh 7.2.4 generic daw --cleanup`
+   -> GRUB Label: "Ubuntu, with Linux 7.2.4-rt-generic"
 
 ---
 

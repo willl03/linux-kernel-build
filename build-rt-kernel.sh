@@ -2,13 +2,30 @@
 set -euo pipefail
 
 # ==============================================================================
+# Sudo Keep-Alive
+# Validate sudo credentials once upfront and refresh the timestamp in the
+# background every 60 seconds so long compiles do not trigger a password prompt.
+# ==============================================================================
+echo "Requesting administrative privileges..."
+sudo -v
+
+while true; do
+    sudo -n true
+    sleep 60
+    kill -0 "$$" || exit
+done 2>/dev/null &
+SUDO_KEEP_ALIVE_PID=$!
+
+trap 'kill "${SUDO_KEEP_ALIVE_PID}" 2>/dev/null || true' EXIT
+
+# ==============================================================================
 # Universal Linux PREEMPT_RT Kernel Build & Packaging Utility
 # ==============================================================================
 # Usage:
-#   ./build-rt-kernel.sh [KERNEL_VERSION] [PLATFORM] [CUSTOM_TAG]
+#   ./build-rt-kernel.sh [KERNEL_VERSION] [PLATFORM] [CUSTOM_TAG] [--cleanup]
 #
 # Platforms:
-#   generic           - (Default) Pure RT audio stack, inherits hardware drivers
+#   generic           - Pure RT audio stack, inherits hardware drivers
 #   amd               - AMD Zen 3/4/5 (Hawk Point / Phoenix / Ryzen) + Radeon
 #   intel-pre-meteor  - Intel 14th Gen and older (Alder Lake, Raptor Lake, i915)
 #   intel-meteor      - Intel Meteor Lake / Arrow Lake (Core Ultra, Xe, HFI)
@@ -17,8 +34,15 @@ set -euo pipefail
 KERNEL_VER="${1:-${KERNEL_VER:-7.2.7}}"
 PLATFORM="${2:-${PLATFORM:-generic}}"
 CUSTOM_TAG="${3:-}"
+DO_CLEANUP=false
 
-if [ -n "${CUSTOM_TAG}" ]; then
+for arg in "$@"; do
+    if [ "$arg" == "--cleanup" ]; then
+        DO_CLEANUP=true
+    fi
+done
+
+if [ -n "${CUSTOM_TAG}" ] && [ "${CUSTOM_TAG}" != "--cleanup" ]; then
     LOCAL_VER="-rt-${PLATFORM}-${CUSTOM_TAG}"
 else
     LOCAL_VER="-rt-${PLATFORM}"
@@ -32,12 +56,15 @@ echo " Target Version  : ${KERNEL_VER}"
 echo " Release String  : ${LOCAL_VER}"
 echo " Boot Menu Label : Ubuntu, with Linux ${KERNEL_VER}${LOCAL_VER}"
 echo " Hardware Profile: [${PLATFORM}]"
+echo " Cleanup Source  : ${DO_CLEANUP}"
 echo "================================================================="
 
 echo "=== 1. Installing Build & Packaging Dependencies ==="
 sudo apt update
 sudo apt install -y \
     build-essential \
+    fakeroot \
+    kmod \
     libncurses-dev \
     bison \
     flex \
@@ -108,8 +135,12 @@ else
 fi
 
 echo "=== 4. Applying Universal Real-Time Tuning ==="
+# Strip vendor keys and module signature enforcement (prevents DKMS build failures)
 scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
 scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
+scripts/config --disable CONFIG_MODULE_SIG
+scripts/config --disable CONFIG_MODULE_SIG_ALL
+scripts/config --disable CONFIG_MODULE_SIG_FORCE
 
 # PREEMPT_RT deterministic scheduling
 scripts/config --enable CONFIG_EXPERT
@@ -127,7 +158,7 @@ scripts/config --set-val CONFIG_HZ 1000
 scripts/config --enable CONFIG_HIGH_RES_TIMERS
 scripts/config --enable CONFIG_NO_HZ_IDLE
 
-# Disable heavy debug overhead and locking trackers
+# Disable debug overhead and locking trackers
 scripts/config --disable CONFIG_DEBUG_INFO
 scripts/config --disable CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT
 scripts/config --disable CONFIG_DEBUG_INFO_DWARF4
@@ -164,11 +195,12 @@ case "${PLATFORM}" in
         ;;
     amd)
         echo "AMD profile: enforcing Zen CPPC (amd_pstate), Radeon (amdgpu as module), and KVM-AMD..."
-        # AMD P-State (Zen 2+)
         scripts/config --enable CONFIG_X86_AMD_PSTATE
         scripts/config --enable CONFIG_X86_AMD_PSTATE_DEFAULT_MODE_ACTIVE
+        scripts/config --enable CONFIG_AMD_IOMMU
+        scripts/config --enable CONFIG_CPU_IDLE_GOV_MENU
 
-        # AMDGPU Graphics Stack (Must be =m to trigger initramfs firmware extraction)
+        # AMDGPU Graphics Stack (Must be =m for initramfs firmware inclusion)
         scripts/config --module CONFIG_DRM_AMDGPU
         scripts/config --enable CONFIG_DRM_AMD_DC
         scripts/config --enable CONFIG_DRM_AMD_DC_FP
@@ -188,9 +220,11 @@ case "${PLATFORM}" in
         echo "Intel legacy profile: enforcing intel_pstate, i915 DRM, and KVM-Intel..."
         scripts/config --enable CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE
         scripts/config --enable CONFIG_X86_INTEL_PSTATE
+        scripts/config --enable CONFIG_CPU_IDLE_GOV_MENU
         scripts/config --module CONFIG_DRM_I915
         scripts/config --module CONFIG_KVM_INTEL
         scripts/config --disable CONFIG_DRM_AMDGPU
+        scripts/config --disable CONFIG_X86_AMD_PSTATE
         ;;
     intel-meteor)
         echo "Intel Meteor Lake profile: enforcing Xe DRM, HFI Thread Director, and PCIe Performance..."
@@ -200,6 +234,12 @@ case "${PLATFORM}" in
         scripts/config --enable CONFIG_INTEL_TURBO_MAX_3
         scripts/config --enable CONFIG_INTEL_IDLE
         scripts/config --enable CONFIG_CPU_IDLE_GOV_MENU
+        
+        # Heterogeneous Core Scheduling (P/E Cores)
+        scripts/config --enable CONFIG_SCHED_SMT
+        scripts/config --enable CONFIG_SCHED_MC
+        scripts/config --enable CONFIG_SCHED_MC_PRIO
+
         scripts/config --module CONFIG_DRM_XE
         scripts/config --module CONFIG_DRM_I915
         scripts/config --module CONFIG_KVM_INTEL
@@ -208,6 +248,7 @@ case "${PLATFORM}" in
         scripts/config --disable CONFIG_PCIEASPM_POWER_SUPERSAVE
         scripts/config --enable CONFIG_PCIEASPM_PERFORMANCE
         scripts/config --disable CONFIG_DRM_AMDGPU
+        scripts/config --disable CONFIG_X86_AMD_PSTATE
         ;;
     *)
         echo "Error: Unknown platform '${PLATFORM}'!"
@@ -219,20 +260,30 @@ esac
 make olddefconfig
 
 echo "=== 6. Configuration Verification ==="
+if ! grep -q "CONFIG_PREEMPT_RT=y" .config; then
+    echo "ERROR: CONFIG_PREEMPT_RT=y was rejected by make olddefconfig!"
+    echo "Check dependencies or verify if this kernel version requires an out-of-tree RT patch."
+    exit 1
+fi
+
 grep -E "CONFIG_PREEMPT_RT=|CONFIG_HZ=|CONFIG_RCU_BOOST=|CONFIG_DRM_AMDGPU=|CONFIG_FW_LOADER_COMPRESS_ZSTD=" .config
 
 echo "=== 7. Compiling Debian Packages ==="
+# Clean old matching packages in destination to avoid installing the wrong builds
+rm -f "${SRC_DIR}"/linux-image-*"${LOCAL_VER}"*.deb "${SRC_DIR}"/linux-headers-*"${LOCAL_VER}"*.deb
+
 make -j"$(nproc)" bindeb-pkg LOCALVERSION="${LOCAL_VER}" 2>&1 | tee build.log
 
-# Read the generated kernel release before removing build files
 RELEASE_NAME=$(cat include/config/kernel.release 2>/dev/null || echo "${KERNEL_VER}${LOCAL_VER}")
 
 echo "=== 8. Installing Kernel Packages & Updating GRUB ==="
-PKG_PATTERN="${SRC_DIR}/linux-image-*${LOCAL_VER}*.deb"
-HDR_PATTERN="${SRC_DIR}/linux-headers-*${LOCAL_VER}*.deb"
+LATEST_PKG=$(find "${SRC_DIR}" -maxdepth 1 -name "linux-image-*${LOCAL_VER}*.deb" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
+LATEST_HDR=$(find "${SRC_DIR}" -maxdepth 1 -name "linux-headers-*${LOCAL_VER}*.deb" -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" ")
 
-LATEST_PKG=$(ls -t ${PKG_PATTERN} | head -n 1)
-LATEST_HDR=$(ls -t ${HDR_PATTERN} | head -n 1)
+if [ -z "${LATEST_PKG}" ] || [ -z "${LATEST_HDR}" ]; then
+    echo "Error: Could not locate compiled .deb packages in ${SRC_DIR}!"
+    exit 1
+fi
 
 echo "Installing: $(basename "${LATEST_PKG}")"
 echo "Installing: $(basename "${LATEST_HDR}")"
@@ -242,14 +293,17 @@ sudo update-grub
 
 echo "=== 9. Cleaning Up Build Artifacts ==="
 cd "${SRC_DIR}"
-if [ -d "linux-${KERNEL_VER}" ]; then
+if [ "${DO_CLEANUP}" = true ] && [ -d "linux-${KERNEL_VER}" ]; then
     echo "Removing source tree 'linux-${KERNEL_VER}' to reclaim disk space..."
     rm -rf "linux-${KERNEL_VER}"
+else
+    echo "Retaining source tree at ${SRC_DIR}/linux-${KERNEL_VER} for DKMS/debugging."
+    echo "Pass '--cleanup' if you wish to automatically remove it."
 fi
 
 echo ""
 echo "================================================================="
-echo " Build Complete & Workspace Cleaned!"
+echo " Build Complete!"
 echo " Installed Kernel: ${RELEASE_NAME}"
 echo " Boot Entry Name : Ubuntu, with Linux ${RELEASE_NAME}"
 echo " Reboot your system to load the new kernel."
